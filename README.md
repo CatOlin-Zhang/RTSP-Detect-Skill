@@ -67,7 +67,7 @@ pip install -r yolo-rtsp-spatial-detector/scripts/requirements.txt
 ```
 
 Requires **Python 3.10+**. Core dependencies:
-- `ultralytics` (YOLOv8)
+- `ultralytics` (YOLO26)
 - `opencv-python`
 - `numpy`
 - `requests` (optional, for HTTP downstream)
