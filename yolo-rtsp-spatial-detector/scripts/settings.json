@@ -1,0 +1,73 @@
+{
+  "_说明": "本 Skill 只做粗检：YOLO 空间关系判定 + 截图落盘。Agent 读取截图做精判后决定是否通知用户。检测什么、关系怎么判，由 model(能力表) + scenarios(场景规则) 决定。",
+
+  "model_path": "yolo26n.pt",
+  "conf_threshold": 0.20,
+  "_阈值说明": "全局阈值调低是为了让被宠物遮挡的餐桌(实测conf 0.21~0.27)也能进候选；主体质量由场景的 min_conf 单独把关",
+  "iou_threshold": 0.45,
+  "device": "",
+
+  "model": {
+    "_注释": "能力表：coco=内置 COCO 80 类（YOLO26/YOLOv8 通用）；自定义模型填 class_names(顺序即类别id) 或注册到 model_catalog.MODEL_PROFILES。",
+    "profile": "coco"
+  },
+
+  "scenarios": [
+    {
+      "name": "pet_on_table",
+      "subject": ["cat", "dog"],
+      "surface": "dining table",
+      "relationship": "on_or_over",
+      "_关系说明": "on_or_over = 站上桌面(on_top) 或 脚在椅/地但身体探入桌面区(body_over)，覆盖探头偷吃姿态",
+      "surface_ratio": 0.6,
+      "margin_x_ratio": 0.0,
+      "min_overlap_ratio": 0.25,
+      "min_conf": 0.35,
+      "enabled": true
+    },
+    {
+      "name": "cat_on_sofa",
+      "subject": "cat",
+      "surface": "couch",
+      "relationship": "on_top",
+      "surface_ratio": 0.55,
+      "enabled": false
+    },
+    {
+      "name": "person_in_chair",
+      "subject": "person",
+      "surface": "chair",
+      "relationship": "within",
+      "margin_x_ratio": 0.2,
+      "margin_y_ratio": 0.2,
+      "enabled": false
+    },
+    {
+      "name": "dog_on_bed",
+      "subject": "dog",
+      "surface": "bed",
+      "relationship": "on_top",
+      "enabled": false
+    }
+  ],
+
+  "rtsp_url": "rtsp://127.0.0.1:8554/stream",
+  "output_dir": "./captures",
+  "frame_skip": 0,
+  "save_cooldown": 10.0,
+  "buffer_size": 2,
+  "downstream_http_url": "",
+  "alert_hold": 3.0,
+
+  "_注释": {
+    "scenarios[].subject/surface": "类别引用：可用类名(如 cat/dining table)或 id(如 15/60)或列表。按 model.profile 能力表解析",
+    "scenarios[].relationship": "空间关系：on_top(脚点落入表面区) | within(中心落入框内) | body_over(身体探入) | on_or_over(on_top或body_over)。可自己扩展",
+    "scenarios[].surface_ratio": "on_top 用：表面区域占整框高度比例(0~1)。俯视角越大越接近1，平视角越大越接近0.5",
+    "scenarios[].margin_x_ratio": "表面区域左右内缩比例，容忍透视偏移/框估大",
+    "scenarios[].enabled": "false 则该场景暂不参与检测，便于快速切换",
+    "save_cooldown": "全局两次截图最小间隔(秒)；scenarios[].cooldown 可针对单场景覆盖",
+    "frame_skip": "每 N 帧处理1帧(0=不跳)，实时性不足时调大",
+    "downstream_http_url": "填了就把截图 POST 到该地址，留空则只落盘到 pending/",
+    "rtsp_url": "由 Agent 启动时写入（来自 @xpai-camera-control），或用 --rtsp 参数传入"
+  }
+}
