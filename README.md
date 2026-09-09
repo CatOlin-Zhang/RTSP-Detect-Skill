@@ -1,7 +1,7 @@
 # YOLO-RTSP Spatial Detector
 
 > Coarse-grained spatial relationship detection on live RTSP camera feeds.  
-> Built on **YOLOv8 + OpenCV** — designed as an Agent Skill for AI assistants.
+> Built on **YOLO26 + OpenCV** — designed as an Agent Skill for AI assistants.
 
 ## What It Does
 
