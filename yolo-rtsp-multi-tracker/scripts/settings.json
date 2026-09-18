@@ -1,0 +1,78 @@
+{
+  "_说明": "多摄像头人员追踪配置。mode=tracking 时使用 cameras + topology 进行跨镜关联；mode=spatial 时回退到原版空间检测（使用 scenarios）。",
+
+  "mode": "tracking",
+
+  "model_path": "yolo26n.pt",
+  "conf_threshold": 0.25,
+  "iou_threshold": 0.45,
+  "device": "",
+
+  "model": {
+    "profile": "coco"
+  },
+
+  "cameras": [
+    {
+      "id": "living_room",
+      "name": "客厅",
+      "source": "rtsp://192.168.1.101:554/stream",
+      "description": "客厅中央，朝南覆盖沙发和电视区域"
+    },
+    {
+      "id": "hallway",
+      "name": "走廊",
+      "source": "rtsp://192.168.1.102:554/stream",
+      "description": "走廊中段，朝东覆盖通往卧室和门口的过道"
+    },
+    {
+      "id": "entrance",
+      "name": "门口",
+      "source": "rtsp://192.168.1.103:554/stream",
+      "description": "入户门内侧，朝西正对大门"
+    }
+  ],
+
+  "topology": {
+    "links": [
+      {
+        "from": "living_room",
+        "to": "hallway",
+        "transit_sec": [3, 12],
+        "overlap": false
+      },
+      {
+        "from": "hallway",
+        "to": "entrance",
+        "transit_sec": [2, 8],
+        "overlap": true
+      }
+    ]
+  },
+
+  "tracking": {
+    "reid_threshold": 0.45,
+    "gallery_max_age_sec": 120,
+    "tracker": "botsort",
+    "track_classes": ["person"]
+  },
+
+  "output_dir": "./captures",
+  "frame_skip": 0,
+  "buffer_size": 2,
+  "downstream_http_url": "",
+
+  "_注释": {
+    "mode": "tracking=多摄像头人员追踪 | spatial=原版空间关系检测",
+    "cameras[].id": "唯一标识，topology.links 中引用此 id",
+    "cameras[].source": "RTSP 地址或本地视频源",
+    "cameras[].description": "位置描述，用于 VLM 关键节点确认时的上下文",
+    "topology.links[].from/to": "摄像头 id，表示这两个摄像头视野相邻",
+    "topology.links[].transit_sec": "[最短, 最长] 转移时间(秒)：从 from 消失到在 to 出现的合理时间窗口",
+    "topology.links[].overlap": "true 表示两摄像头视野有重叠，允许同一人同时出现在两个画面",
+    "tracking.reid_threshold": "OSNet 余弦相似度阈值，>=该值认为是同一人（默认 0.45）",
+    "tracking.gallery_max_age_sec": "特征缓存最大保留时间(秒)，消失超过此时长的人不再尝试重识别",
+    "tracking.tracker": "Ultralytics 内置跟踪器：botsort(默认) | bytetrack",
+    "tracking.track_classes": "要跟踪的目标类别，默认只跟踪 person"
+  }
+}

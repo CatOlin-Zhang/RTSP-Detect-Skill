@@ -1,0 +1,12 @@
+# Core dependencies
+ultralytics>=8.4.0
+opencv-python>=4.7.0
+numpy>=1.23.0
+
+# Cross-camera tracking
+# torchreid install: pip install git+https://github.com/KaiyangZhou/deep-person-reid.git
+lap>=0.5.12
+torch>=1.13.0
+torchvision>=0.14.0
+
+requests>=2.28.0
