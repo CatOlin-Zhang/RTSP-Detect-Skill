@@ -10,213 +10,352 @@ description: |-
 
 # Multi-Camera Person Tracking Skill
 
-This skill provides **cross-camera person tracking**: given multiple RTSP camera
-feeds and a topology configuration describing camera adjacency and transit times,
-it tracks the same person across cameras with a persistent global ID.
-
-Key capabilities:
-- **Single-camera tracking**: Ultralytics track() with BoT-SORT for persistent per-camera IDs
-- **Appearance features**: Torchreid OSNet extracts 512-dim ReID embeddings per person crop
-- **Cross-camera association**: matches appearance + topology/time constraints to link identities
-- **Overlap handling**: supports cameras with overlapping fields of view (same person in multiple views)
-- **Brief disappearance recovery**: gallery buffer retains recent embeddings for re-identification
+This skill runs as a **persistent background service** that tracks persons across
+multiple RTSP cameras. It exposes **6 tools via HTTP API** for the Agent to query
+tracking data and trigger trajectory analysis on demand.
 
 ## Architecture
 
 ```
-Camera 1 RTSP ──→ YOLO track() ──→ OSNet features ──┐
-Camera 2 RTSP ──→ YOLO track() ──→ OSNet features ──┤──→ Cross-camera ──→ Trajectory
-Camera 3 RTSP ──→ YOLO track() ──→ OSNet features ──┘    Association      Output
-                                                          (topology +       (global IDs,
-                                                           time window)      timeline)
+                        Agent (decision maker)
+                              │
+                     HTTP tool calls (6 tools)
+                              │
+┌─────────────────────────────▼─────────────────────────────┐
+│              Tracking Service (background)                  │
+│                                                            │
+│  Camera 1 ──→ YOLO track() ──→ OSNet ReID ──┐             │
+│  Camera 2 ──→ YOLO track() ──→ OSNet ReID ──┤─→ 跨摄关联   │
+│  Camera 3 ──→ YOLO track() ──→ OSNet ReID ──┘   │          │
+│                                                    ▼        │
+│                                              EventStore     │
+│                                              (append-only)  │
+│                                                    │        │
+│                                         API Server (:8765)  │
+└────────────────────────────────────────────────────────────┘
 ```
 
-## Role
+**Key design decision**: The tracker runs passively and accumulates data.
+The Agent decides WHEN and WHAT to analyze by calling tools.
+No automatic VLM calls — all analysis is Agent-triggered.
 
-```
-User intent ("Watch the dog — don't let it steal food from the table")
-       ↓  Agent maps to
-  Spatial relationship (dog + dining table + on_or_over)
-       ↓
-  This Skill: YOLO coarse detection → suspicious match → screenshot saved
-       ↓
-  Agent reads screenshot → fine-grained judgment (stealing? sleeping? passing by?)
-       ↓
-  Confirmed violation → notify user; false positive → no disturbance
-```
+## Agent Tools (HTTP API)
 
-**This skill = coarse detection + screenshot provider.** It does not perform
-fine-grained review and does not notify the user.
+Base URL: `http://127.0.0.1:8765` (configurable in settings.json `api_server`)
 
-## Workflow
-
-### 1. Obtain RTSP Stream URL
-
-Use `@xpai-camera-control` to connect to the target camera and retrieve the live
-stream URL (`rtsp://...`). This skill does not manage cameras — it only consumes
-RTSP streams.
-
-### 2. Configure Detection Scenarios
-
-Edit `scripts/settings.json` and declare monitoring scenarios in the `scenarios`
-array. The Agent must map user intent to COCO 80-class combinations (see "Semantic
-Mapping" below).
-
-Write the RTSP URL into the `rtsp_url` field, or pass it via `--rtsp` at startup.
-
-### 3. Start Detection
-
+All responses are JSON. Start the tracker with:
 ```bash
-python scripts/main.py --rtsp "rtsp://..."
+python scripts/main.py --mode tracking
 ```
 
-The skill runs as a **persistent background process**: continuously reading the
-stream → YOLO inference → spatial relationship check → trigger screenshots. After
-startup, the Agent can handle other tasks and periodically check the screenshot
-directory.
+---
 
-Common CLI arguments:
+### Tool 1: `tracker_status`
 
-| Argument | Description |
-|---|---|
-| `--rtsp "rtsp://..."` | Override RTSP stream URL |
-| `--source 0` | Use local webcam for debugging |
-| `--source demo.mp4` | Use a video file for debugging |
-| `--frame-skip N` | Process 1 out of every N frames for better real-time performance |
-| `--conf 0.35` | Override global confidence threshold |
-| `--cooldown 10` | Minimum interval between screenshots (seconds) |
-| `--show` | Open OpenCV preview window (with HUD overlay) |
-| `--mjpeg-port 8090` | MJPEG live stream port for browser viewing |
-| `--list-classes` | Print model capability table (COCO 80 classes) |
+**When to use**: Check if the tracker is running, camera health, how many people tracked.
 
-### 4. Read Coarse Detection Screenshots
+```
+GET /api/status
+```
 
-Triggered screenshots are stored in `scripts/captures/pending/`:
-
-- `<id>.jpg` — raw trigger frame
-- `<id>_annotated.jpg` — annotated frame (red box = subject / blue box = surface)
-- `<id>.json` — event metadata:
-
+**Response**:
 ```json
 {
-  "event_id": "20260907_143022",
-  "scenario": "pet_on_table",
-  "relationship": "on_or_over",
-  "subject": "dog",
-  "subject_conf": 0.82,
-  "surface": "dining table",
-  "suspicious": true,
-  "created_at": 1757234422.0
+  "tool": "tracker_status",
+  "status": "running",
+  "uptime_sec": 3600.5,
+  "uptime_human": "1h0min",
+  "fps": 12.3,
+  "total_persons": 3,
+  "total_events": 847,
+  "cameras": {
+    "dining": {"connected": true, "frames_read": 12340},
+    "hallway": {"connected": true, "frames_read": 12200},
+    "living": {"connected": false, "last_error": "read failed"}
+  },
+  "topology": {"cameras": ["dining", "hallway", "living"], "links": 3}
 }
 ```
 
-### 5. Agent Secondary Review
+---
 
-The Agent acts as a secondary reviewer:
+### Tool 2: `list_persons`
 
-1. Read `captures/pending/<id>.jpg` (screenshot) and `<id>.json` (event description)
-2. Combined with the user's monitoring intent, determine whether the coarse
-   detection trigger **truly constitutes** an alertable behavior
-3. Confirmed violation → notify user; false positive → no disturbance
+**When to use**: Get an overview of all detected persons — who appeared, where they were last seen.
 
-The Agent can write the verdict back to `captures/reviewed/<id>.json`, and the HUD
-will automatically display the review status.
+```
+GET /api/persons
+```
 
-## Semantic Mapping Guide
+**Response**:
+```json
+{
+  "tool": "list_persons",
+  "total": 3,
+  "persons": [
+    {
+      "global_id": 1,
+      "first_seen": "2026-09-20 08:00:15",
+      "last_seen": "2026-09-20 08:32:05",
+      "duration_hours": 0.53,
+      "total_events": 47,
+      "appearances": 4,
+      "cameras_seen": ["dining", "hallway", "living"],
+      "last_camera": "living",
+      "last_position": [0.52, 0.68],
+      "is_active": false
+    }
+  ]
+}
+```
 
-The model is YOLOv8n, recognizing **COCO 80 classes** (run
-`python scripts/main.py --list-classes` to see the full list). Common classes:
+---
 
-| Class Name | Description | Class Name | Description |
+### Tool 3: `get_person_detail`
+
+**When to use**: Get full timeline and analysis history for a specific person.
+
+```
+GET /api/person/<global_id>
+```
+
+**Response**:
+```json
+{
+  "tool": "get_person_detail",
+  "summary": {
+    "global_id": 1,
+    "first_seen": "2026-09-20 08:00:15",
+    "last_seen": "2026-09-20 08:32:05",
+    "appearances": 4,
+    "cameras_seen": ["dining", "hallway", "living"],
+    "is_active": false
+  },
+  "timeline": [
+    {"event_type": "new_person", "camera": "dining", "timestamp": 1758340815.0, "track_id": 1},
+    {"event_type": "lingered", "camera": "dining", "timestamp": 1758340830.0, "duration_sec": 15.2},
+    {"event_type": "vanished", "camera": "dining", "timestamp": 1758340820.0, "duration_sec": 15.2},
+    {"event_type": "cross_camera", "camera": "hallway", "timestamp": 1758340825.0, "transit_sec": 5.0},
+    {"event_type": "vanished", "camera": "hallway", "timestamp": 1758340840.0},
+    {"event_type": "appeared", "camera": "living", "timestamp": 1758340857.0}
+  ],
+  "analyses": [
+    {"since": "08:00:15", "until": "08:32:05", "vlm_summary": {"1": {"summary": "从餐厅逗留后经走廊至客厅"}}}
+  ]
+}
+```
+
+---
+
+### Tool 4: `analyze_trajectory` (核心分析工具)
+
+**When to use**: Trigger a retrospective trajectory analysis for a person. Renders a
+trajectory image on the floor plan and optionally calls VLM for semantic annotation.
+This is the "回溯截断" tool — it analyzes everything up to the specified time.
+
+```
+POST /api/analyze
+Content-Type: application/json
+
+{
+  "global_id": 1,
+  "since": "08:00:00",
+  "until": "09:30:00",
+  "include_vlm": true
+}
+```
+
+**Parameters**:
+| Field | Type | Required | Description |
 |---|---|---|---|
-| `person` | Person | `cat` | Cat |
-| `dog` | Dog | `bird` | Bird |
-| `dining table` | Dining table | `couch` | Sofa/Couch |
-| `chair` | Chair | `bed` | Bed |
-| `potted plant` | Potted plant | `tv` | TV |
-| `laptop` | Laptop | `keyboard` | Keyboard |
-| `cell phone` | Cell phone | `refrigerator` | Refrigerator |
-| `backpack` | Backpack | `suitcase` | Suitcase |
+| `global_id` | int | Yes | Person to analyze |
+| `since` | string | No | Start time (HH:MM:SS or ISO). Default = all history |
+| `until` | string | No | End time. Default = now |
+| `include_vlm` | bool | No | Whether to call VLM for semantic labels (default: true) |
 
-### Mapping Principles
+**Response**:
+```json
+{
+  "tool": "analyze_trajectory",
+  "global_id": 1,
+  "time_range": {"since": "08:00:00", "until": "09:30:00"},
+  "event_count": 12,
+  "key_events": [
+    {"type": "new_person", "time": "08:00:15", "camera": "dining", "position": [0.24, 0.19]},
+    {"type": "lingered", "time": "08:00:30", "camera": "dining", "duration_sec": 15.2},
+    {"type": "vanished", "time": "08:00:20", "camera": "dining"},
+    {"type": "cross_camera", "time": "08:00:25", "camera": "hallway", "details": "match_source=neighbor"},
+    {"type": "appeared", "time": "08:00:57", "camera": "living", "position": [0.52, 0.68]}
+  ],
+  "trajectory_image": "./trajectories/analysis_1_20260920_093000.png",
+  "vlm_result": {
+    "labels": {"1": {"labels": {"①": "进门逗留", "②": "走廊转移"}, "summary": "从入口进餐厅逗留后经走廊到客厅"}}
+  }
+}
+```
 
-YOLO can only identify "what's in the frame and where" — it **cannot understand
-behavioral semantics**. The Agent needs to decompose user intent into COCO class +
-spatial relationship combinations:
+**Agent decision pattern**: Call this tool when:
+- User asks "what has person X been doing?"
+- A significant event occurs (long disappearance, unusual location, etc.)
+- You need to generate a report for the user
 
-- "Dog stealing food from table" → `subject: dog`, `surface: dining table`, `relationship: on_or_over`
-- "Cat entered the bedroom" → `subject: cat`, `surface: bed`, `relationship: on_top` (bed as a zone proxy)
-- "Pet chewing cables" → `subject: [cat, dog]`, requires custom surface class or ROI zone
-- "Child approaching pool" → `subject: person`, `surface: swimming pool`, `relationship: within`
-- "Package taken away" → beyond spatial relationship capability; suggest alternative solution
+---
 
-**This skill's coarse detection has blind spots**: a pet lying on the table
-sleeping vs. standing on the table eating — the spatial relationship result is
-identical. This is precisely why the Agent's secondary review is needed.
+### Tool 5: `get_event_log`
 
-### Scenario Configuration Fields
+**When to use**: Query raw events in a time range. Useful for "what happened between 8am and 9am?"
 
-Each entry in the `scenarios` array:
+```
+GET /api/events?since=08:00:00&until=09:00:00&global_id=1&limit=50
+```
 
-- `name` — scenario identifier
-- `subject` — subject class (name, id, or list), i.e., "who"
-- `surface` — surface/zone class, i.e., "where"
-- `relationship` — spatial relationship:
-  - `on_top`: contact on top surface (foot point falls within surface zone)
-  - `within`: entered interior (center point falls within bounding box)
-  - `body_over`: body intruding (head/upper body crosses over surface)
-  - `on_or_over`: on_top or body_over (recommended for pet scenarios)
-- `surface_ratio`: surface zone height ratio relative to full bounding box (0–1, default 0.6)
-- `min_conf`: minimum subject confidence
-- `cooldown`: per-scenario screenshot cooldown in seconds (overrides global `save_cooldown`)
-- `enabled`: whether the scenario is active
+**Parameters** (all optional query params):
+| Param | Description |
+|---|---|
+| `since` | Start time (HH:MM:SS or ISO or unix timestamp) |
+| `until` | End time |
+| `global_id` | Filter by person |
+| `event_type` | Filter by type: appeared/lingered/vanished/cross_camera/new_person/analysis |
+| `limit` | Max results (default 100) |
 
-## Configuration Reference
+---
 
-`scripts/settings.json` core fields:
+### Tool 6: `render_snapshot`
 
-- `rtsp_url` — RTSP stream URL (written by Agent at startup or passed via `--rtsp`)
-- `model_path` — model path (`yolov8n.pt` for speed / `yolov8m.pt` for accuracy)
-- `conf_threshold` — global confidence threshold (recommended 0.20–0.30; surfaces partially occluded yield lower confidence)
-- `iou_threshold` — NMS deduplication threshold
-- `frame_skip` — process 1 out of every N frames (0 = no skipping)
-- `save_cooldown` — global minimum interval between screenshots in seconds (default 10)
-- `scenarios` — scenario rules array (see field descriptions above)
+**When to use**: Get the current real-time state — who is where RIGHT NOW.
 
-## Extensibility
+```
+GET /api/snapshot?format=json
+GET /api/snapshot?format=png
+```
 
-- **New models**: set `model.class_names` in settings (a list ordered by class id)
-- **New scenarios**: add entries to the `scenarios` array — zero code changes
-- **New spatial relationships**: `geometry.register_relationship("above", fn)` to register a custom evaluator
+**JSON Response**:
+```json
+{
+  "tool": "render_snapshot",
+  "timestamp": "2026-09-20 14:30:22",
+  "active_persons": {
+    "1": {
+      "camera": "living",
+      "position": [0.52, 0.68],
+      "last_event": "track_update",
+      "last_seen": "14:30:20"
+    }
+  },
+  "total_tracked": 3,
+  "currently_active": 1
+}
+```
 
-## Collaboration with @xpai-camera-control
+**PNG Response**: Returns the current trajectory rendered on the floor plan image.
 
-This skill is used in conjunction with `@xpai-camera-control`:
+---
 
-1. Agent calls `@xpai-camera-control` to connect to a camera and obtain the RTSP URL
-2. Pass the URL to this skill (write to `settings.json` `rtsp_url` or via `--rtsp`)
-3. Start this skill for continuous monitoring
-4. When screenshots are triggered, the Agent reads them for fine-grained review and decides whether to notify the user
+## Agent Usage Patterns
+
+### Pattern 1: User asks "Where is everyone?"
+```
+Agent calls: GET /api/snapshot
+→ Returns who is currently active and where
+```
+
+### Pattern 2: User asks "What did person 1 do today?"
+```
+Agent calls: GET /api/person/1
+→ Gets full timeline
+Agent decides: "There's enough data to analyze"
+Agent calls: POST /api/analyze {"global_id": 1, "include_vlm": true}
+→ Gets trajectory image + VLM summary
+Agent presents: image + summary to user
+```
+
+### Pattern 3: Suspicious activity detection
+```
+Agent monitors: GET /api/status (periodic)
+Agent notices: person appeared at unusual time (3am)
+Agent calls: POST /api/analyze {"global_id": 2, "since": "03:00:00"}
+→ Analyzes the suspicious segment
+Agent alerts user with trajectory image
+```
+
+### Pattern 4: "What happened while I was away?"
+```
+Agent calls: GET /api/events?since=09:00:00&until=18:00:00&event_type=appeared
+→ Lists all appearances during absence
+Agent calls: POST /api/analyze for each person who appeared
+→ Generates summary for each
+```
+
+## Event Types Reference
+
+| Event | Trigger | Fields |
+|---|---|---|
+| `new_person` | First time seeing this person | global_id, camera, bbox, confidence |
+| `appeared` | Person appears in a camera (re-enter) | global_id, camera, bbox, confidence |
+| `lingered` | Person stayed > threshold (default 8s) | global_id, camera, duration_sec |
+| `vanished` | Person disappeared from camera | global_id, camera, duration_sec |
+| `cross_camera` | Same person matched across cameras | global_id, camera, transit_sec, confidence |
+| `analysis` | Agent-triggered analysis result | global_id, analysis_result |
+
+## Starting the Service
+
+```bash
+# Start tracking mode (background service)
+python scripts/run.py --mode tracking
+
+# With preview
+python scripts/run.py --mode tracking --show
+
+# With custom port
+# Edit settings.json: api_server.port = 9000
+python scripts/run.py --mode tracking
+```
+
+The service runs continuously. The Agent connects to the API to query and analyze.
+
+## Configuration
+
+See `scripts/settings.json` for all options. Key sections:
+
+- `cameras[]` — camera IDs, names, RTSP sources
+- `topology.links[]` — adjacency, transit times, overlap flags
+- `tracking` — ReID threshold, gallery age, tracker type
+- `trajectory` — floor plan image, camera positions on plan, linger threshold
+- `api_server` — host/port for Agent tool API
 
 ## File Index
 
-| File | Responsibility |
-|---|---|
-| `scripts/main.py` | Main pipeline: stream input → inference → spatial check → screenshot |
-| `scripts/spatial_detector.py` | YOLO inference wrapper |
-| `scripts/scenario.py` | Scenario rule parsing and evaluation |
-| `scripts/geometry.py` | Spatial relationship geometry checks (pure math, unit-testable) |
-| `scripts/model_catalog.py` | Model capability catalog (COCO 80 classes) |
-| `scripts/downstream.py` | Event Sink abstraction (File / HTTP / Callable) |
-| `scripts/vision_review.py` | Screenshot queue management (pending / reviewed directories) |
-| `scripts/hud.py` | HUD status panel overlay |
-| `scripts/preview.py` | MJPEG live streaming server |
-| `scripts/settings.json` | All configuration |
-| `references/tuning.md` | Threshold tuning & RTSP hardening guide |
-
-Test files are located in the `tests/` directory (not part of skill runtime):
-
-| File | Responsibility |
-|---|---|
-| `tests/test_geometry.py` | Spatial geometry unit tests |
-| `tests/test_scenarios.py` | Capability mapping + scenario rule unit tests |
+```
+scripts/
+├── run.py                          # Entry point (sys.path setup + delegate)
+├── main.py                         # CLI 解析 + 两种模式主循环
+├── settings.json                   # All configuration
+├── requirements.txt                # Python dependencies
+│
+├── core/                           # 共享基础设施
+│   ├── geometry.py                 # Box 定义 + 空间关系几何判定
+│   ├── model_catalog.py            # 模型能力表 (COCO 80类)
+│   └── event_store.py              # 事件日志 (append-only, 线程安全)
+│
+├── detection/                      # 检测层
+│   ├── spatial_detector.py         # YOLO detect() + track() 封装
+│   ├── scenario.py                 # 场景规则 (声明式配置 → 评估器)
+│   ├── downstream.py               # Sink 链 (文件/HTTP/回调)
+│   ├── hud.py                      # HUD 状态面板渲染
+│   ├── vision_review.py            # 截图队列 (粗检 → Agent 精判)
+│   └── preview.py                  # MJPEG 直播服务
+│
+├── tracking/                       # 跨摄追踪层
+│   ├── tracking_models.py          # 数据模型 (CameraTrack, GlobalPerson, Topology)
+│   ├── reid_extractor.py           # OSNet 512维特征提取
+│   ├── cross_camera.py             # 跨摄关联引擎 (外观+时间+拓扑)
+│   └── multi_camera.py             # 多路 RTSP 流并行管理
+│
+├── trajectory/                     # 轨迹标注层
+│   ├── trajectory_annotator.py     # 节点/路径段构建 + 位置推算
+│   ├── trajectory_renderer.py      # PIL 平面图精确渲染
+│   └── vlm_annotate_prompt.py      # VLM prompt 构建 + 响应解析
+│
+└── agent/                          # Agent 工具层
+    └── api_server.py               # HTTP API (6 tools for Agent)
+```

@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 import cv2
 
-from geometry import SpatialRelation
+from core.geometry import SpatialRelation
 
 logger = logging.getLogger("downstream")
 

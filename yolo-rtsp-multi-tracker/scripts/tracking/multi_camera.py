@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from tracking_models import CameraConfig
+from tracking.tracking_models import CameraConfig
 
 logger = logging.getLogger("multi_camera")
 

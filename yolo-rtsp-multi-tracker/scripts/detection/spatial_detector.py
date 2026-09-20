@@ -21,9 +21,9 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-from geometry import Box, SpatialRelation
-from model_catalog import COCO_PROFILE, ModelProfile
-from scenario import ResolvedScenario, evaluate_scenarios
+from core.geometry import Box, SpatialRelation
+from core.model_catalog import COCO_PROFILE, ModelProfile
+from detection.scenario import ResolvedScenario, evaluate_scenarios
 
 logger = logging.getLogger("spatial_detector")
 

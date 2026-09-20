@@ -17,8 +17,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from geometry import Box, SpatialRelation
-from model_catalog import ClassRef, ModelProfile, resolve_class
+from core.geometry import Box, SpatialRelation
+from core.model_catalog import ClassRef, ModelProfile, resolve_class
 
 logger = logging.getLogger("scenario")
 
@@ -112,7 +112,7 @@ def resolve_scenario(cfg: dict, profile: ModelProfile) -> Optional[ResolvedScena
 
 def _REL_EVAL_NAMES():
     # 延迟 import 避免几何 -> scenario 循环
-    from geometry import RELATIONSHIP_EVALUATORS
+    from core.geometry import RELATIONSHIP_EVALUATORS
     return RELATIONSHIP_EVALUATORS
 
 
@@ -144,7 +144,7 @@ def evaluate_scenarios(boxes: List[Box], scenarios: List[ResolvedScenario]) -> L
     每个 subject 匹配一张最合适的 surface（on 优先，其次 IoU），结果包含 on=False
     的诊断项，供主流程按需过滤 / 下游判断。
     """
-    from geometry import RELATIONSHIP_EVALUATORS, is_on_top
+    from core.geometry import RELATIONSHIP_EVALUATORS, is_on_top
 
     results: List[SpatialRelation] = []
     for sc in scenarios:

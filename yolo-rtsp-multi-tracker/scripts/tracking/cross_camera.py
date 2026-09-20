@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from tracking_models import (
+from tracking.tracking_models import (
     CameraTrack,
     FeatureGallery,
     GlobalPerson,

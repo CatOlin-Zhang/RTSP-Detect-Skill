@@ -2,6 +2,7 @@
 ultralytics>=8.4.0
 opencv-python>=4.7.0
 numpy>=1.23.0
+Pillow>=9.0.0
 
 # Cross-camera tracking
 # torchreid install: pip install git+https://github.com/KaiyangZhou/deep-person-reid.git

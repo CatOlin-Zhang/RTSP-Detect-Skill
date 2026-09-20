@@ -31,25 +31,30 @@ from typing import Dict
 import cv2
 import numpy as np
 
-from spatial_detector import DetectConfig, YoloDetector, draw_boxes, draw_relation
-from downstream import (
+from detection.spatial_detector import DetectConfig, YoloDetector, draw_boxes, draw_relation
+from detection.downstream import (
     TriggerEvent,
     FileSink,
     HttpSink,
     CallableSink,
     CompositeSink,
 )
-from model_catalog import build_model_profile, COCO_PROFILE
-from scenario import build_scenarios
-from hud import HudState, draw_hud
-from vision_review import VisionReviewer, ReviewConfig
-from preview import MjpegServer
+from core.model_catalog import build_model_profile, COCO_PROFILE
+from detection.scenario import build_scenarios
+from detection.hud import HudState, draw_hud
+from detection.vision_review import VisionReviewer, ReviewConfig
+from detection.preview import MjpegServer
 
 # Tracking mode imports
-from tracking_models import CameraConfig, CameraTrack, Topology, TopologyLink
-from reid_extractor import ReIDExtractor, crop_person
-from cross_camera import CrossCameraAssociator, AssociationConfig
-from multi_camera import MultiCameraManager
+from tracking.tracking_models import CameraConfig, CameraTrack, Topology, TopologyLink
+from tracking.reid_extractor import ReIDExtractor, crop_person
+from tracking.cross_camera import CrossCameraAssociator, AssociationConfig
+from tracking.multi_camera import MultiCameraManager
+from trajectory.trajectory_annotator import TrajectoryAnnotator, CameraPose
+from trajectory.trajectory_renderer import TrajectoryRenderer, RenderConfig
+from trajectory.vlm_annotate_prompt import VLMAnnotator, annotate_and_render
+from core.event_store import EventStore, TrackingEvent
+from agent.api_server import APIServer, TrackerContext
 
 logging.basicConfig(
     level=logging.INFO,
@@ -296,7 +301,7 @@ def run_tracking(settings: dict, show: bool = False, mjpeg_port: int = 0) -> Non
     track_class_ids = set()
     for name in track_classes_names:
         try:
-            from model_catalog import resolve_class
+            from core.model_catalog import resolve_class
             track_class_ids.update(resolve_class(name, profile))
         except Exception:
             logger.warning("无法解析跟踪类别: %s", name)
@@ -336,6 +341,33 @@ def run_tracking(settings: dict, show: bool = False, mjpeg_port: int = 0) -> Non
         frame_skip=int(settings.get("frame_skip", 0)),
     )
 
+    # 初始化轨迹标注器
+    traj_cfg = settings.get("trajectory", {})
+    camera_poses = {}
+    for cam_id, pos_cfg in traj_cfg.get("camera_positions", {}).items():
+        camera_poses[cam_id] = CameraPose.from_config(pos_cfg)
+    annotator = TrajectoryAnnotator(
+        camera_poses=camera_poses,
+        linger_threshold_sec=float(traj_cfg.get("linger_threshold_sec", 8)),
+        vanish_timeout_sec=float(traj_cfg.get("vanish_timeout_sec", 30)),
+    )
+    traj_output_dir = os.path.join(
+        HERE, traj_cfg.get("output_dir", "./trajectories").lstrip("./"),
+    )
+    floor_plan_path = traj_cfg.get("floor_plan_image", "")
+    if floor_plan_path and not os.path.isabs(floor_plan_path):
+        floor_plan_path = os.path.join(HERE, floor_plan_path)
+    render_cfg = RenderConfig(
+        output_size=tuple(traj_cfg.get("render_size", [1200, 900])),
+    )
+    try:
+        renderer = TrajectoryRenderer(floor_plan_path, render_cfg)
+    except RuntimeError:
+        renderer = None
+        logger.warning("Pillow 未安装，轨迹图渲染不可用")
+    realtime_interval = float(traj_cfg.get("realtime_interval_sec", 5))
+    last_render_time = 0.0
+
     # 预热模型
     try:
         dummy = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -350,6 +382,27 @@ def run_tracking(settings: dict, show: bool = False, mjpeg_port: int = 0) -> Non
     if mjpeg_port:
         mjpeg = MjpegServer(port=mjpeg_port)
         logger.info("MJPEG 预览: %s", mjpeg.start())
+
+    # 初始化事件存储 + Agent 工具 API
+    events_dir = os.path.join(HERE, traj_cfg.get("output_dir", "./trajectories").lstrip("./"), "events")
+    store = EventStore(output_dir=events_dir)
+
+    api_cfg = settings.get("api_server", {})
+    api_ctx = TrackerContext()
+    api_ctx.event_store = store
+    api_ctx.annotator = annotator
+    api_ctx.renderer = renderer
+    api_ctx.vlm_annotator = VLMAnnotator(call_fn=None)
+    api_ctx.topology = topology
+    api_ctx.camera_manager = cam_mgr
+    api_ctx.output_dir = traj_output_dir
+    api_ctx.start_time = time.time()
+
+    api_port = int(api_cfg.get("port", 8765))
+    api_host = api_cfg.get("host", "127.0.0.1")
+    api = APIServer(host=api_host, port=api_port, context=api_ctx)
+    api_url = api.start()
+    logger.info("Agent 工具 API: %s (6 tools available)", api_url)
 
     # 每摄像头的轨迹跟踪状态: {cam_id: {track_id: CameraTrack}}
     active_tracks: Dict[str, Dict[int, CameraTrack]] = {
@@ -380,11 +433,27 @@ def run_tracking(settings: dict, show: bool = False, mjpeg_port: int = 0) -> Non
                 if now - fps_t0 >= 1.0:
                     fps = fps_count / (now - fps_t0)
                     fps_t0, fps_count = now, 0
+                    api_ctx.fps = fps  # 更新 API 上下文的 FPS
                     active_persons = associator.get_active_persons()
                     logger.info(
                         "FPS=%.1f | persons=%d | gallery=%d | %s",
                         fps, len(active_persons), associator._gallery.size, cam_id,
                     )
+                    # 停留检测：遍历活跃轨迹，超过阈值的记录 lingered 事件
+                    linger_sec = float(traj_cfg.get("linger_threshold_sec", 8))
+                    for tid, trk in active_tracks[cam_id].items():
+                        if trk.global_id is not None and trk.duration >= linger_sec:
+                            # 只在该轨迹尚未记录过 lingered 时才写入
+                            if not hasattr(trk, '_lingered_logged'):
+                                trk._lingered_logged = True
+                                store.append(TrackingEvent(
+                                    event_type="lingered",
+                                    global_id=trk.global_id,
+                                    camera=cam_id,
+                                    timestamp=now,
+                                    duration_sec=trk.duration,
+                                    track_id=tid,
+                                ))
 
                 # 1. YOLO 跟踪
                 tracked_boxes = detector.track(frame)
@@ -399,6 +468,29 @@ def run_tracking(settings: dict, show: bool = False, mjpeg_port: int = 0) -> Non
                     lost_track = active_tracks[cam_id].pop(tid)
                     if (now - lost_track.last_seen) >= LOST_THRESHOLD_SEC:
                         associator.on_track_lost(lost_track)
+                        # 标注器：轨迹消失
+                        if lost_track.global_id is not None:
+                            last_bbox = None
+                            if lost_track.bbox_history:
+                                _, bx1, by1, bx2, by2 = lost_track.bbox_history[-1]
+                                last_bbox = (bx1, by1, bx2, by2)
+                            annotator.on_track_lost(
+                                global_id=lost_track.global_id,
+                                camera_id=cam_id,
+                                last_bbox=last_bbox,
+                                frame_size=(frame.shape[1], frame.shape[0]),
+                                timestamp=now,
+                            )
+                            # 事件存储
+                            store.append(TrackingEvent(
+                                event_type="vanished",
+                                global_id=lost_track.global_id,
+                                camera=cam_id,
+                                timestamp=now,
+                                bbox=last_bbox,
+                                duration_sec=lost_track.duration,
+                                track_id=lost_track.track_id,
+                            ))
                         logger.debug(
                             "轨迹消失: cam=%s tid=%d gid=%d",
                             cam_id, tid, lost_track.global_id,
@@ -430,7 +522,8 @@ def run_tracking(settings: dict, show: bool = False, mjpeg_port: int = 0) -> Non
                         continue
 
                     # 获取或创建轨迹
-                    if box.track_id not in active_tracks[cam_id]:
+                    is_new_track = box.track_id not in active_tracks[cam_id]
+                    if is_new_track:
                         active_tracks[cam_id][box.track_id] = CameraTrack(
                             track_id=box.track_id,
                             camera_id=cam_id,
@@ -449,12 +542,75 @@ def run_tracking(settings: dict, show: bool = False, mjpeg_port: int = 0) -> Non
                             "新人员 global_id=%d 首次出现在 %s",
                             result.global_id, cam_id,
                         )
+                        # 标注器：新人员出现
+                        annotator.on_track_update(
+                            global_id=result.global_id,
+                            camera_id=cam_id,
+                            bbox=(box.x1, box.y1, box.x2, box.y2),
+                            frame_size=(frame.shape[1], frame.shape[0]),
+                            timestamp=now,
+                            track_is_new=True,
+                        )
+                        # 事件存储
+                        store.append(TrackingEvent(
+                            event_type="new_person",
+                            global_id=result.global_id,
+                            camera=cam_id,
+                            timestamp=now,
+                            bbox=(box.x1, box.y1, box.x2, box.y2),
+                            confidence=box.conf,
+                            track_id=box.track_id,
+                        ))
                     elif result.matched and result.match_source in ("gallery", "neighbor", "overlap"):
                         logger.info(
                             "跨摄匹配: cam=%s tid=%d -> gid=%d (%s, sim=%.3f)",
                             cam_id, box.track_id, result.global_id,
                             result.match_source, result.similarity,
                         )
+                        # 标注器：跨摄转移
+                        link = topology.get_link(cam_id, cam_id)  # 获取上一个摄像头
+                        transit_time = 2.0  # 默认估计
+                        annotator.on_cross_camera_match(
+                            global_id=result.global_id,
+                            from_camera="",  # 由 annotator 内部推断
+                            to_camera=cam_id,
+                            bbox=(box.x1, box.y1, box.x2, box.y2),
+                            frame_size=(frame.shape[1], frame.shape[0]),
+                            timestamp=now,
+                            transit_sec=transit_time,
+                        )
+                        # 事件存储
+                        store.append(TrackingEvent(
+                            event_type="cross_camera",
+                            global_id=result.global_id,
+                            camera=cam_id,
+                            timestamp=now,
+                            bbox=(box.x1, box.y1, box.x2, box.y2),
+                            transit_sec=transit_time,
+                            confidence=result.similarity,
+                            details=f"match_source={result.match_source}",
+                        ))
+                    elif result.matched and result.match_source == "existing":
+                        # 标注器：同轨迹持续更新
+                        annotator.on_track_update(
+                            global_id=result.global_id,
+                            camera_id=cam_id,
+                            bbox=(box.x1, box.y1, box.x2, box.y2),
+                            frame_size=(frame.shape[1], frame.shape[0]),
+                            timestamp=now,
+                            track_is_new=False,
+                        )
+                        # 事件存储：仅在轨迹刚开始时记录 appeared（避免高频写入）
+                        if is_new_track:
+                            store.append(TrackingEvent(
+                                event_type="appeared",
+                                global_id=result.global_id,
+                                camera=cam_id,
+                                timestamp=now,
+                                bbox=(box.x1, box.y1, box.x2, box.y2),
+                                confidence=box.conf,
+                                track_id=box.track_id,
+                            ))
 
                 # 6. 可视化（画跟踪框 + global_id）
                 if show or mjpeg:
@@ -486,14 +642,38 @@ def run_tracking(settings: dict, show: bool = False, mjpeg_port: int = 0) -> Non
             if not processed_any:
                 time.sleep(0.01)
 
+            # 实时轨迹图渲染（每 N 秒刷新一次）
+            if renderer and (now - last_render_time) >= realtime_interval:
+                last_render_time = now
+                try:
+                    annotation = annotator.build_annotation(floor_plan_path)
+                    live_path = os.path.join(traj_output_dir, "trajectory_live.png")
+                    renderer.render(annotation, live_path)
+                except Exception as exc:
+                    logger.debug("实时轨迹渲染失败: %s", exc)
+
     finally:
         cam_mgr.stop_all()
+        api.stop()
+        store.close()
         if mjpeg:
             mjpeg.stop()
         if show:
             cv2.destroyAllWindows()
         # 输出最终轨迹报告
         logger.info("\n%s", associator.trajectory_report())
+        # 生成最终轨迹标注图
+        if renderer:
+            try:
+                annotator.on_tracking_end(time.time())
+                annotation = annotator.build_annotation(floor_plan_path)
+                vlm_annotator = VLMAnnotator(call_fn=None)  # 未配置 VLM 时跳过语义标注
+                final_path, _ = annotate_and_render(
+                    annotation, renderer, traj_output_dir, vlm_annotator,
+                )
+                logger.info("最终轨迹图: %s", final_path)
+            except Exception as exc:
+                logger.error("最终轨迹渲染失败: %s", exc)
 
 
 def parse_args(argv=None):

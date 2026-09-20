@@ -14,38 +14,47 @@
 
   "cameras": [
     {
-      "id": "living_room",
-      "name": "客厅",
+      "id": "dining",
+      "name": "餐厅",
       "source": "rtsp://192.168.1.101:554/stream",
-      "description": "客厅中央，朝南覆盖沙发和电视区域"
+      "description": "餐厅区域左上角，靠近入户玄关，朝右覆盖餐桌及厨房通道入口"
     },
     {
       "id": "hallway",
       "name": "走廊",
       "source": "rtsp://192.168.1.102:554/stream",
-      "description": "走廊中段，朝东覆盖通往卧室和门口的过道"
+      "description": "卫生间旁走廊中段，朝右下覆盖卫生间到客厅的过道"
     },
     {
-      "id": "entrance",
-      "name": "门口",
+      "id": "living",
+      "name": "客厅",
       "source": "rtsp://192.168.1.103:554/stream",
-      "description": "入户门内侧，朝西正对大门"
+      "description": "客厅沙发/茶几附近，朝右上广角覆盖客厅主区域、部分餐厅及阳台入口"
     }
   ],
 
   "topology": {
     "links": [
       {
-        "from": "living_room",
+        "from": "dining",
         "to": "hallway",
-        "transit_sec": [3, 12],
-        "overlap": false
+        "transit_sec": [3, 8],
+        "overlap": false,
+        "_说明": "餐厅到走廊需经过玄关/过道，无视野重叠"
+      },
+      {
+        "from": "dining",
+        "to": "living",
+        "transit_sec": [2, 10],
+        "overlap": true,
+        "_说明": "餐厅与客厅开放连通，两摄像头都覆盖餐厅区域，有视野重叠"
       },
       {
         "from": "hallway",
-        "to": "entrance",
+        "to": "living",
         "transit_sec": [2, 8],
-        "overlap": true
+        "overlap": false,
+        "_说明": "走廊到客厅直连，无视野重叠"
       }
     ]
   },
@@ -57,10 +66,30 @@
     "track_classes": ["person"]
   },
 
+  "trajectory": {
+    "floor_plan_image": "floor_plan.jpg",
+    "linger_threshold_sec": 8,
+    "vanish_timeout_sec": 30,
+    "realtime_interval_sec": 5,
+    "output_dir": "./trajectories",
+    "render_size": [1200, 900],
+    "camera_positions": {
+      "dining":  {"x": 0.18, "y": 0.22, "fov_direction": "east",     "fov_angle": 90, "coverage_radius": 0.12},
+      "hallway": {"x": 0.25, "y": 0.48, "fov_direction": "southeast", "fov_angle": 70, "coverage_radius": 0.10},
+      "living":  {"x": 0.45, "y": 0.75, "fov_direction": "northeast", "fov_angle": 110, "coverage_radius": 0.15}
+    }
+  },
+
   "output_dir": "./captures",
   "frame_skip": 0,
   "buffer_size": 2,
   "downstream_http_url": "",
+
+  "api_server": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "_说明": "Agent 工具 API 服务器。Agent 通过 HTTP 调用工具查询追踪数据和分析轨迹。"
+  },
 
   "_注释": {
     "mode": "tracking=多摄像头人员追踪 | spatial=原版空间关系检测",
@@ -73,6 +102,14 @@
     "tracking.reid_threshold": "OSNet 余弦相似度阈值，>=该值认为是同一人（默认 0.45）",
     "tracking.gallery_max_age_sec": "特征缓存最大保留时间(秒)，消失超过此时长的人不再尝试重识别",
     "tracking.tracker": "Ultralytics 内置跟踪器：botsort(默认) | bytetrack",
-    "tracking.track_classes": "要跟踪的目标类别，默认只跟踪 person"
+    "tracking.track_classes": "要跟踪的目标类别，默认只跟踪 person",
+    "trajectory.floor_plan_image": "平面图图片路径，用作轨迹渲染底图",
+    "trajectory.camera_positions": "各摄像头在平面图上的归一化坐标(0~1)和朝向",
+    "trajectory.camera_positions[].fov_direction": "朝向: east/southeast/south/west/north/northeast 等，或角度(0=右,90=下)",
+    "trajectory.camera_positions[].coverage_radius": "覆盖半径(归一化距离)，表示 FoV 扇形大小",
+    "trajectory.linger_threshold_sec": "停留超过此秒数标记为 linger 节点",
+    "trajectory.realtime_interval_sec": "实时轨迹图刷新间隔(秒)",
+    "api_server.host": "Agent 工具 API 监听地址(默认 127.0.0.1 仅本机访问)",
+    "api_server.port": "Agent 工具 API 端口(默认 8765)"
   }
 }
