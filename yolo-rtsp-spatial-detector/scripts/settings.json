@@ -2,6 +2,9 @@
   "_说明": "本 Skill 只做粗检：YOLO 空间关系判定 + 截图落盘。Agent 读取截图做精判后决定是否通知用户。检测什么、关系怎么判，由 model(能力表) + scenarios(场景规则) 决定。",
 
   "model_path": "yolo26n.pt",
+  "_backend说明": "auto=按 model_path 后缀选后端(.onnx->onnxruntime, .pt->ultralytics) | onnx=强制轻量后端(零torch, 需 onnxruntime) | ultralytics=强制torch后端。部署机不想装 torch 时：用 export_onnx.py 导出 .onnx 后把 model_path 指向它",
+  "backend": "auto",
+  "input_size": 640,
   "conf_threshold": 0.20,
   "_阈值说明": "全局阈值调低是为了让被宠物遮挡的餐桌(实测conf 0.21~0.27)也能进候选；主体质量由场景的 min_conf 单独把关",
   "iou_threshold": 0.45,
@@ -68,6 +71,8 @@
     "save_cooldown": "全局两次截图最小间隔(秒)；scenarios[].cooldown 可针对单场景覆盖",
     "frame_skip": "每 N 帧处理1帧(0=不跳)，实时性不足时调大",
     "downstream_http_url": "填了就把截图 POST 到该地址，留空则只落盘到 pending/",
-    "rtsp_url": "由 Agent 启动时写入（来自 @xpai-camera-control），或用 --rtsp 参数传入"
+    "rtsp_url": "由 Agent 启动时写入（来自 @xpai-camera-control），或用 --rtsp 参数传入",
+    "backend": "推理后端：auto(推荐) | onnx(轻量部署，零torch，需 onnxruntime) | ultralytics(全功能，需torch)。.onnx 模型自动走 onnx 后端",
+    "input_size": "ONNX 后端的固定输入边长，必须与 export_onnx.py 导出时的 --imgsz 一致（默认 640）"
   }
 }

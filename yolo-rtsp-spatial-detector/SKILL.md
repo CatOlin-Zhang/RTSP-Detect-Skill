@@ -2,12 +2,14 @@
 name: rtsp-spatial-detector
 description: |-
   Coarse-grained spatial relationship detection on live camera feeds.
-  Built on YOLOv8 + OpenCV, it maps the user's monitoring intent to
+  Built on YOLO26 + OpenCV, it maps the user's monitoring intent to
   spatial relationship checks between COCO classes.
   Detection is coarse — when a "suspicious" match is found, a screenshot
   is saved to disk. Fine-grained behavior recognition is NOT performed;
   an Agent reads the screenshot for secondary review before notifying
   the user. Requires @xpai-camera-control to obtain RTSP stream URLs, or any other RTSP stream URL.
+  Supports two inference backends: ultralytics (full, needs torch) and
+  ONNX + onnxruntime (lightweight, ~70MB download, zero torch).
 ---
 
 # Live Camera Coarse Detection Skill 
@@ -59,6 +61,29 @@ Write the RTSP URL into the `rtsp_url` field, or pass it via `--rtsp` at startup
 python scripts/main.py --rtsp "rtsp://..."
 ```
 
+#### Lightweight Deployment (no torch)
+
+By default the skill runs YOLO via `ultralytics`, which pulls in PyTorch
+(~200MB+ download, >1GB disk). For lightweight deployment machines, use
+the ONNX backend instead — **~70MB total download, zero torch**:
+
+1. **Once, on a dev machine that has ultralytics/torch**, export the model:
+   ```bash
+   python scripts/export_onnx.py          # yolo26n.pt -> yolo26n.onnx (~10MB)
+   ```
+2. Ship `yolo26n.onnx` with the skill, install only the light deps:
+   ```bash
+   pip install opencv-python numpy onnxruntime
+   ```
+3. Point `model_path` to the `.onnx` file (or pass `--model yolo26n.onnx`).
+   Backend selection is automatic by file extension; `backend` in settings
+   (`auto` | `onnx` | `ultralytics`) forces it explicitly.
+
+Verified equivalence: on the same frames, ONNX backend matches ultralytics
+5/5 detections (IoU ≥ 0.89, conf delta ≤ 0.02), ~38ms/frame on CPU (nano model).
+Note: `cv2.dnn` cannot replace onnxruntime here — YOLO26's end-to-end head
+(TopK/GatherElements ops) produces silently-wrong values in cv2.dnn (tested).
+
 The skill runs as a **persistent background process**: continuously reading the
 stream → YOLO inference → spatial relationship check → trigger screenshots. After
 startup, the Agent can handle other tasks and periodically check the screenshot
@@ -77,6 +102,8 @@ Common CLI arguments:
 | `--show` | Open OpenCV preview window (with HUD overlay) |
 | `--mjpeg-port 8090` | MJPEG live stream port for browser viewing |
 | `--list-classes` | Print model capability table (COCO 80 classes) |
+| `--model yolo26n.onnx` | Point to an ONNX model to switch to the lightweight backend |
+| `--backend auto\|onnx\|ultralytics` | Force inference backend (default: auto by file extension) |
 
 ### 4. Read Coarse Detection Screenshots
 
@@ -113,7 +140,7 @@ will automatically display the review status.
 
 ## Semantic Mapping Guide
 
-The model is YOLOv8n, recognizing **COCO 80 classes** (run
+The model is YOLO26n, recognizing **COCO 80 classes** (run
 `python scripts/main.py --list-classes` to see the full list). Common classes:
 
 | Class Name | Description | Class Name | Description |
@@ -165,9 +192,11 @@ Each entry in the `scenarios` array:
 `scripts/settings.json` core fields:
 
 - `rtsp_url` — RTSP stream URL (written by Agent at startup or passed via `--rtsp`)
-- `model_path` — model path (`yolov8n.pt` for speed / `yolov8m.pt` for accuracy)
+- `model_path` — model path (`yolo26n.pt` for speed / `yolo26m.pt` for accuracy / `yolo26n.onnx` for lightweight deployment)
+- `backend` — inference backend: `auto` (default, by file extension) | `onnx` (lightweight, zero torch, needs onnxruntime) | `ultralytics` (full, needs torch)
+- `input_size` — fixed square input size for the ONNX backend (must match the `--imgsz` used in export_onnx.py; default 640)
 - `conf_threshold` — global confidence threshold (recommended 0.20–0.30; surfaces partially occluded yield lower confidence)
-- `iou_threshold` — NMS deduplication threshold
+- `iou_threshold` — NMS deduplication threshold (ultralytics backend only; the ONNX end-to-end model has NMS baked in)
 - `frame_skip` — process 1 out of every N frames (0 = no skipping)
 - `save_cooldown` — global minimum interval between screenshots in seconds (default 10)
 - `scenarios` — scenario rules array (see field descriptions above)
@@ -191,8 +220,10 @@ This skill is used in conjunction with `@xpai-camera-control`:
 
 | File | Responsibility |
 |---|---|
-| `scripts/main.py` | Main pipeline: stream input → inference → spatial check → screenshot |
-| `scripts/spatial_detector.py` | YOLO inference wrapper |
+| `scripts/main.py` | Main pipeline: stream input → inference (backend switch) → spatial check → screenshot |
+| `scripts/spatial_detector.py` | ultralytics YOLO inference wrapper (torch backend) |
+| `scripts/onnx_detector.py` | ONNX + onnxruntime lightweight inference backend (zero torch) |
+| `scripts/export_onnx.py` | One-shot .pt → .onnx export (dev machine only, needs ultralytics) |
 | `scripts/scenario.py` | Scenario rule parsing and evaluation |
 | `scripts/geometry.py` | Spatial relationship geometry checks (pure math, unit-testable) |
 | `scripts/model_catalog.py` | Model capability catalog (COCO 80 classes) |
@@ -209,3 +240,4 @@ Test files are located in the `tests/` directory (not part of skill runtime):
 |---|---|
 | `tests/test_geometry.py` | Spatial geometry unit tests |
 | `tests/test_scenarios.py` | Capability mapping + scenario rule unit tests |
+| `tests/test_onnx_detector.py` | Letterbox / output parsing / backend routing unit tests |

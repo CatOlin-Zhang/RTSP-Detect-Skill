@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Skill runtime output (captures, event store, etc.)
+captures/
+
+# IDE
+.idea/workspace.xml

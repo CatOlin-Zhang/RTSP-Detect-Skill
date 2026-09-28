@@ -28,6 +28,8 @@ from typing import Any, Dict
 import cv2
 import numpy as np
 
+from downstream import imwrite_safe
+
 logger = logging.getLogger("vision_review")
 
 
@@ -67,7 +69,7 @@ class VisionReviewer:
 
         try:
             img_path = os.path.join(self.pending_dir, f"{event_id}.jpg")
-            cv2.imwrite(img_path, frame)
+            imwrite_safe(img_path, frame)
             with open(os.path.join(self.pending_dir, f"{event_id}.json"), "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
             logger.info("粗检截图已入队 -> pending/%s", event_id)

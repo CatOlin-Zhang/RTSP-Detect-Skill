@@ -71,6 +71,31 @@ def load_settings(path: str) -> dict:
     return {}
 
 
+def build_detector(settings: dict, cfg: DetectConfig, profile):
+    """按 backend 配置构建检测器（ultralytics / ONNX+onnxruntime）。
+
+    backend 取值："auto"（默认，按 model_path 后缀识别）| "ultralytics" | "onnx"。
+    .onnx 权重永远走 ONNX 后端（torch 无法加载它）；.pt 默认走 ultralytics。
+    ONNX 后端不依赖 torch/ultralytics，部署机只需 opencv-python + numpy
+    + onnxruntime（合计 ~70MB 下载）。
+    """
+    backend = str(settings.get("backend", "auto")).lower()
+    is_onnx_file = str(cfg.model_path).lower().endswith(".onnx")
+    if backend == "onnx":
+        if not is_onnx_file:
+            logger.warning("backend=onnx 但 model_path 不是 .onnx: %s", cfg.model_path)
+        from onnx_detector import OnnxDetector
+
+        return OnnxDetector(cfg, profile=profile)
+    if backend == "auto" and is_onnx_file:
+        from onnx_detector import OnnxDetector
+
+        return OnnxDetector(cfg, profile=profile)
+    from spatial_detector import YoloDetector
+
+    return YoloDetector(cfg, profile=profile)
+
+
 def open_capture(source, buffer_size: int = 2):
     """打开视频源。RTSP 建议把 CAP_PROP_BUFFERSIZE 调小，避免帧堆积导致高延迟。"""
     cap = cv2.VideoCapture(source)
@@ -108,8 +133,9 @@ def run(settings: dict, show: bool = False, mjpeg_port: int = 0) -> None:
         conf_threshold=float(settings.get("conf_threshold", 0.30)),
         iou_threshold=float(settings.get("iou_threshold", 0.45)),
         device=settings.get("device", ""),
+        input_size=int(settings.get("input_size", 640)),
     )
-    detector = YoloDetector(cfg, profile=profile)
+    detector = build_detector(settings, cfg, profile)
 
     # 预热：用一张空帧跑一次，避免首帧推理拖慢实时流
     try:
@@ -257,7 +283,9 @@ def parse_args(argv=None):
     p.add_argument("--source", default=None, help="覆盖视频源: rtsp://... | 摄像头索引 | 视频文件")
     p.add_argument("--rtsp", default=None, help="覆盖 RTSP 地址")
     p.add_argument("--frame-skip", type=int, default=None, help="每 N 帧处理 1 帧 (0=不跳)")
-    p.add_argument("--model", default=None, help="覆盖模型路径，如 yolo26n.pt")
+    p.add_argument("--model", default=None, help="覆盖模型路径，如 yolo26n.pt 或 yolo26n.onnx")
+    p.add_argument("--backend", default=None, choices=["auto", "ultralytics", "onnx"],
+                   help="推理后端：auto(按模型后缀) | ultralytics(需 torch) | onnx(onnxruntime, 零 torch)")
     p.add_argument("--surface-ratio", type=float, default=None, help="on_top 场景表面区域占比默认值 0~1")
     p.add_argument("--conf", type=float, default=None, help="置信度阈值")
     p.add_argument("--cooldown", type=float, default=None, help="两次截图/送检最小间隔(秒)，留空则用 settings.json 的 save_cooldown(默认10秒)")
@@ -290,6 +318,8 @@ def main(argv=None) -> int:
         settings["frame_skip"] = args.frame_skip
     if args.model is not None:
         settings["model_path"] = args.model
+    if args.backend is not None:
+        settings["backend"] = args.backend
     if args.surface_ratio is not None:
         settings["surface_ratio"] = args.surface_ratio
     if args.conf is not None:

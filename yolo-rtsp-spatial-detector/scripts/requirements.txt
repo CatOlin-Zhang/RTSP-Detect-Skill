@@ -1,6 +1,16 @@
-# Core dependencies
-ultralytics>=8.4.0
+# Core dependencies (lightweight ONNX deployment - no torch needed)
+# Use this set when model_path points to a .onnx file (see export_onnx.py):
+#   opencv-python-headless can replace opencv-python on headless servers.
 opencv-python>=4.7.0
 numpy>=1.23.0
+onnxruntime>=1.16.0
 
+# Optional: HTTP downstream push (downstream.py HttpSink)
 requests>=2.28.0
+
+# Optional: Chinese HUD text rendering (falls back to ASCII if missing)
+# Pillow>=9.0.0
+
+# Full ultralytics backend only (needed when model_path is a .pt file).
+# Requires torch (~200MB+ download). Skip on lightweight deployments:
+# ultralytics>=8.4.0

@@ -25,6 +25,21 @@ from geometry import SpatialRelation
 logger = logging.getLogger("downstream")
 
 
+def imwrite_safe(path: str, img: "np.ndarray") -> bool:
+    """cv2.imwrite 的中文路径安全版。
+
+    cv2.imwrite 内部走 C 层 fopen，Windows 上路径含非 ASCII 字符（如中文
+    用户名）时会静默失败返回 False。改用 imencode（内存编码）+ ndarray
+    .tofile（Python 层写文件）绕过，行为与平台无关。
+    """
+    ext = os.path.splitext(path)[1] or ".jpg"
+    ok, buf = cv2.imencode(ext, img)
+    if not ok:
+        return False
+    buf.tofile(path)
+    return True
+
+
 @dataclass
 class TriggerEvent:
     """一次触发事件的载体，沿 Sink 链传递。"""
@@ -57,7 +72,7 @@ class FileSink(Sink):
     def emit(self, event: TriggerEvent) -> None:
         ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(event.timestamp))
         raw_path = os.path.join(self.out_dir, f"capture_{ts}.jpg")
-        ok = cv2.imwrite(raw_path, event.frame)
+        ok = imwrite_safe(raw_path, event.frame)
         if not ok:
             raise IOError(f"cv2.imwrite 失败，无法保存截图: {raw_path}")
         event.image_path = raw_path
@@ -67,7 +82,7 @@ class FileSink(Sink):
             try:
                 ann = self.draw_fn(event.frame, event.relation)
                 ann_path = os.path.join(self.out_dir, f"capture_{ts}_annotated.jpg")
-                if not cv2.imwrite(ann_path, ann):
+                if not imwrite_safe(ann_path, ann):
                     logger.warning("标注图保存失败: %s", ann_path)
             except Exception as exc:  # 标注失败不应阻断主流程
                 logger.warning("标注图生成失败: %s", exc)

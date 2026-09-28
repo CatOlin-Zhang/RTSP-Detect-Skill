@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -23,17 +24,27 @@ from geometry import Box, SpatialRelation
 from model_catalog import COCO_PROFILE, ModelProfile
 from scenario import ResolvedScenario, evaluate_scenarios
 
+# 与 multi-tracker 的 reid_extractor.py 同源：Anaconda 环境 numpy 与 torch 各带一份
+# OpenMP 运行时（libiomp5md.dll），同进程共存时加载即 OMP Error #15 崩溃。
+# 本模块在 numpy 之后延迟 import torch（ultralytics），必须先设此变量。
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 logger = logging.getLogger("spatial_detector")
 
 
 @dataclass
 class DetectConfig:
-    """检测相关配置（纯模型/推理参数，不含任何场景语义）。"""
+    """检测相关配置（纯模型/推理参数，不含任何场景语义）。
+
+    input_size 仅 ONNX 后端（onnx_detector.py）使用：导出时固定的正方形输入边长。
+    ultralytics 后端忽略此字段（它自行管理预处理尺寸）。
+    """
 
     model_path: str = "yolo26n.pt"
     conf_threshold: float = 0.30
     iou_threshold: float = 0.45
     device: str = ""   # '' => 自动选择 (cpu / cuda)
+    input_size: int = 640
 
 
 class YoloDetector:
